@@ -4,7 +4,6 @@ import struct
 
 decimal_round = 5
 
-print("Hello World")
 serialPort = serial.Serial(
     port="COM3", baudrate=1382400, bytesize=8, timeout=2, stopbits=serial.STOPBITS_TWO
 )
