@@ -1,161 +1,207 @@
 import tkinter as tk
-import matplotlib.pyplot as plt
+from tkinter import ttk
+import threading
+import struct
+import serial
 import numpy as np
-from matplotlib.figure import Figure
+import queue
+import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+# Global variables
+update_time = 100  # Time of update in ms
+decimal_round = 5
+running = True
+flag = 0
+buffer_size = 100
+serialPort = serial.Serial("COM3", baudrate=1382400, timeout=2)
 
-update_time = 500   # Time of update in ms
-text_update_time = update_time
-graph_update_time = update_time
-
-
-# Function to animate both graphs
-def update_graph(frame=0):
-    shift = frame * 0.1
-    sin_value = np.sin(shift)
-    cos_value = np.cos(shift)
-
-    # Update graph data
-    line_sin.set_ydata(np.sin(x + shift))
-    line_cos.set_ydata(np.cos(x + shift))
-
-    # Text of each square (Change this ↓ part to a value that gets updated in real time)
-    square1_1.config(text=f"sin: {sin_value:.2f}")
-    square1_2.config(text=f"cos: {cos_value:.2f}")
-
-    # Redraw graphs
-    canvas_sin.draw()
-    canvas_cos.draw()
-
-    # Repeat the update.
-    root.after(graph_update_time, update_graph, frame + 1)    # Change the first number to alter the refresh rate
+# Buffers for graphs
+heart_phase_values = np.zeros(buffer_size)
+breath_phase_values = np.zeros(buffer_size)
+time_values = np.arange(-buffer_size + 1, 1, 1)
 
 
-    
-
-# Example: Automatically adding placeholder messages
-def update_text():
-
-    # Replace this by the output of the serial port
-    message="This is a placeholder message."
-
-
-    text_log.config(state="normal")     # Enable editing
-
-    # Check if the scrollbar is at the bottom to allow view of the log
-    if text_log.yview()[1] == 1.0:  # If at bottom (1.0 means fully scrolled down)
-        auto_scroll = True
-    else:
-        auto_scroll = False
-    
-    text_log.insert("end", message + "\n")  # Append message
-    text_log.config(state="disabled")       # Disable editing
-    if auto_scroll:                         # Only keeps the scroll at the end if the scrollbar is at the bottom
-        text_log.yview("end")
-    root.after(text_update_time, update_text)
+def initialize_serial():
+    """Initialize the serial port."""
+    global serialPort
+    try:
+        serialPort = serial.Serial(
+            port="COM3", baudrate=1382400, bytesize=8, timeout=2, stopbits=serial.STOPBITS_TWO
+        )
+        print("Serial port initialized successfully.")
+    except Exception as e:
+        print(f"Error initializing serial port: {e}")
 
 
-# Create the main window
-root = tk.Tk()
-root.title("Simple GUI Layout")
-root.geometry("1400x800")
+class SerialReaderApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Serial Data Reader")
+        self.queue = queue.Queue()
 
-# Configure the main window's grid
-root.columnconfigure(0, weight=2)  # Top side (Graphs)
-root.columnconfigure(1, weight=1)  # Right side (Squares)
-root.rowconfigure(0, weight=2)  # Upper section (Graphs & Squares)
-root.rowconfigure(1, weight=1)  # Bottom section (Text log)
+        # Create the main frame
+        main_frame = ttk.Frame(root)
+        main_frame.grid(row=0, column=0, sticky="nsew")
 
-# Top section: Two areas
-Top_frame = tk.Frame(root)
-Top_frame.grid(row=0, column=0, rowspan=2, sticky="nsew")
+        # Left side: Graphs
+        graph_frame = ttk.Frame(main_frame)
+        graph_frame.grid(row=0, column=0, sticky="nsew")
 
-Top_frame.rowconfigure(0, weight=0)  # Space for squares
-Top_frame.rowconfigure(1, weight=1)  # Space for graphs
-Top_frame.columnconfigure(0, weight=1)  # Ensure that the graphs occupy all the space (remember the blue and light blue test)
+        # Create the graphs
+        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(5, 4), sharex=True)
+        self.ax1.set_title("Heart Phase")
+        self.ax1.set_ylim(-8, 8)
+        self.ax2.set_title("Breath Phase")
+        self.ax2.set_ylim(-8, 8)
+        self.ax2.set_xlabel("Time")
+        self.line1, = self.ax1.plot(time_values, heart_phase_values, "r-")
+        self.line2, = self.ax2.plot(time_values, breath_phase_values, "b-")
+        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
+        canvas_widget = self.canvas.get_tk_widget()
+        canvas_widget.pack(fill=tk.BOTH, expand=True)
 
-# Squares with the values from the graphs + a third square
-square_frame = tk.Frame(Top_frame)
-square_frame.grid(row=0, column=1, sticky="nsew")
+        # Right side: Labels (Squares)
+        square_frame = ttk.Frame(main_frame)
+        square_frame.grid(row=0, column=1, sticky="nsew", padx=10)
 
-square_frame.columnconfigure(0, weight=1)
-square_frame.rowconfigure([0, 1, 2], weight=0)
+        self.square1_1 = tk.Label(square_frame, bg="white", font=("Arial", 14), fg="black",
+                                  borderwidth=2, relief="solid", width=20, height=3)
+        self.square1_1.pack(pady=5)
+
+        self.square1_2 = tk.Label(square_frame, bg="white", font=("Arial", 14), fg="black",
+                                  borderwidth=2, relief="solid", width=20, height=3)
+        self.square1_2.pack(pady=5)
+
+        self.square1_3 = tk.Label(square_frame, bg="white", font=("Arial", 14), fg="black",
+                                  borderwidth=2, relief="solid", width=20, height=3)
+        self.square1_3.pack(pady=5)
+
+        self.square1_4 = tk.Label(square_frame, bg="white", font=("Arial", 14), fg="black",
+                                  borderwidth=2, relief="solid", width=20, height=3)
+        self.square1_4.pack(pady=5)
+
+        # Log area
+        log_frame = ttk.Frame(root)
+        log_frame.grid(row=1, column=0, sticky="nsew")
+        self.text_log = tk.Text(log_frame, height=6, width=50, state=tk.DISABLED)
+        self.text_log.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(log_frame, command=self.text_log.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.text_log.config(yscrollcommand=scrollbar.set)
+
+        # Configure grid weights
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=3)
+        root.rowconfigure(1, weight=1)
+        main_frame.columnconfigure(0, weight=3)
+        main_frame.columnconfigure(1, weight=1)
+
+        # Start the serial reading thread
+        self.thread = threading.Thread(target=self.read_serial_thread, daemon=True)
+        self.thread.start()
+
+        # Start the UI update loop
+        self.update_ui()
+
+    def read_serial_thread(self):
+        """Read data from the serial port in a separate thread."""
+        global flag, heart_phase_values, breath_phase_values
+        while running:
+            try:
+                byte = serialPort.read(1)
+                if byte == b'\x0A':
+                    next_byte = serialPort.read(1)
+                    if next_byte == b'\x14':
+                        flag = 0
+                    elif next_byte == b'\x13':
+                        data = serialPort.read(13)
+                        TotalPhase = struct.unpack('<f', data[1:5])[0]
+                        BreathPhase = struct.unpack('<f', data[5:9])[0]
+                        HeartPhase = struct.unpack('<f', data[9:13])[0]
+                        self.queue.put({
+                            "type": "data",
+                            "message": f"Breath: {BreathPhase}, Heart: {HeartPhase}, Total: {TotalPhase}\n",
+                            "HeartPhase": HeartPhase,
+                            "BreathPhase": BreathPhase,
+                            "TotalPhase": TotalPhase
+                        })
+                        # Update the buffers for the graphs
+                        heart_phase_values[:-1] = heart_phase_values[1:]
+                        heart_phase_values[-1] = HeartPhase
+                        breath_phase_values[:-1] = breath_phase_values[1:]
+                        breath_phase_values[-1] = BreathPhase
+                        flag = 1
+                    elif next_byte == b'\x16' and flag == 1:
+                        data = serialPort.read(9)
+                        Distance = struct.unpack('<f', data[5:9])[0]
+                        self.queue.put({
+                            "type": "distance",
+                            "message": f"Distance: {Distance}\n",
+                            "Distance": Distance
+                        })
+            except Exception as e:
+                self.queue.put({"type": "error", "message": f"Error reading serial data: {e}\n"})
+
+    def update_ui(self):
+        """Update the UI with new data from the queue."""
+        while not self.queue.empty():
+            item = self.queue.get()
+            if item["type"] == "data":
+                # Update labels
+                self.update_square_labels(
+                    item["HeartPhase"], item["BreathPhase"], item["TotalPhase"], 0
+                )
+            elif item["type"] == "distance":
+                # Update only the distance label
+                self.square1_4.config(text=f"Distance:\n{round(item['Distance'], decimal_round)}")
+
+            # Log message
+            self.text_log.config(state=tk.NORMAL)
+            self.text_log.insert(tk.END, item["message"])
+            self.text_log.config(state=tk.DISABLED)
+            self.text_log.yview(tk.END)
+
+        # Update the graphs
+        self.line1.set_ydata(heart_phase_values)
+        self.line2.set_ydata(breath_phase_values)
+        self.canvas.draw()
+
+        if running:
+            self.root.after(update_time, self.update_ui)
+
+    def update_square_labels(self, HeartPhase, BreathPhase, TotalPhase, Distance):
+        """Update the square labels with the latest values."""
+        self.square1_1.config(text=f"Heart:\n{round(HeartPhase, decimal_round)}")
+        self.square1_2.config(text=f"Breath:\n{round(BreathPhase, decimal_round)}")
+        self.square1_3.config(text=f"Total:\n{round(TotalPhase, decimal_round)}")
+        self.square1_4.config(text=f"Distance:\n{round(Distance, decimal_round)}")
+
+    def on_close(self):
+        """Handle application shutdown."""
+        global running
+        running = False
+        if serialPort and serialPort.is_open:
+            serialPort.close()
+        self.root.destroy()
 
 
-square1_1 = tk.Label(square_frame, bg="white", font=("Arial", 16), fg="black", borderwidth=4, relief="solid", width=10, height=5)
-square1_1.grid(row=0, column=0, padx=10, pady=10)
-
-square1_2 = tk.Label(square_frame, bg="white", font=("Arial", 16), fg="black", borderwidth=4, relief="solid", width=10, height=5)
-square1_2.grid(row=1, column=0, padx=10, pady=10)
-
-square1_3 = tk.Label(square_frame, text="Other", bg="white", font=("Arial", 16), fg="black", borderwidth=4, relief="solid", width=10, height=5)
-square1_3.grid(row=2, column=0, padx=10, pady=10)
-
-
-# Upper-Left area: Two rectangles (for the graphs)
-graph_frame = tk.Frame(Top_frame)
-graph_frame.grid(row=0, column=0, sticky="nsew")
+def create_gui():
+    """Create and configure the GUI."""
+    global root
+    root = tk.Tk()
+    root.geometry("1600x1000")
+    app = SerialReaderApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_close)
+    return root
 
 
-graph_frame.columnconfigure(0, weight=1)
-graph_frame.rowconfigure(0, weight=1)
-graph_frame.rowconfigure(1, weight=1)
-
-# Upper Graph (sine wave)
-fig_sin = Figure(figsize=(5, 2), dpi=100)
-ax_sin = fig_sin.add_subplot(111)
-ax_sin.axhline(y=0, color='black', linewidth=1, linestyle='--') # 0 line
-x = np.linspace(0, 2 * np.pi, 100)
-y_sin = np.sin(x)
-line_sin, = ax_sin.plot(x, y_sin, 'b')
+def main():
+    """Main function to initialize and run the application."""
+    initialize_serial()
+    root = create_gui()
+    root.mainloop()
 
 
-ax_sin.set_xticks([])
-ax_sin.set_yticks([])
-
-canvas_sin = FigureCanvasTkAgg(fig_sin, master=graph_frame)
-canvas_sin.get_tk_widget().grid(row=0, column=0, sticky="nsew")
-
-# Bottom Graph (cosine wave)
-fig_cos = Figure(figsize=(5, 2), dpi=100)
-ax_cos = fig_cos.add_subplot(111)
-ax_cos.axhline(y=0, color='black', linewidth=1, linestyle='--') # 0 line
-y_cos = np.cos(x)
-line_cos, = ax_cos.plot(x, y_cos, 'c')  # 'c' for cyan
-
-ax_cos.set_xticks([])
-ax_cos.set_yticks([])
-
-canvas_cos = FigureCanvasTkAgg(fig_cos, master=graph_frame)
-canvas_cos.get_tk_widget().grid(row=1, column=0, sticky="nsew")
-
-
-# Right section: Scrollable text log
-right_frame = tk.Frame(root)
-right_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
-
-right_frame.columnconfigure(0, weight=1)
-right_frame.rowconfigure(0, weight=0)
-
-# Scrollbar
-scrollbar = tk.Scrollbar(right_frame)
-scrollbar.grid(row=0, column=1, sticky="ns")
-
-# Text widget for displaying messages
-text_log = tk.Text(right_frame, wrap="word", font=("Arial", 12), bg="white", fg="black", state="disabled", height=1)
-text_log.grid(row=0, column=0, sticky="nsew")
-
-text_log.config(yscrollcommand=scrollbar.set, height=15)   #   Connects the scrollbar and the text log
-scrollbar.config(command=text_log.yview)
-
-
-
-
-
-
-update_text()   # Function that updates the text
-update_graph()  # Function that updates the graphs
-
-# Run the main loop
-root.mainloop()
+if __name__ == "__main__":
+    main()
