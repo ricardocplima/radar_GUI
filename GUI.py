@@ -13,8 +13,8 @@ update_time = 100  # Time of update in ms
 decimal_round = 5
 running = True
 flag = 0
-buffer_size = 100
-serialPort = serial.Serial("COM3", baudrate=1382400, timeout=2)
+buffer_size = 60    # In seconds
+# serialPort = serial.Serial("COM4", baudrate=1382400, timeout=2)
 
 # Buffers for graphs
 heart_phase_values = np.zeros(buffer_size)
@@ -27,7 +27,7 @@ def initialize_serial():
     global serialPort
     try:
         serialPort = serial.Serial(
-            port="COM3", baudrate=1382400, bytesize=8, timeout=2, stopbits=serial.STOPBITS_TWO
+            port="COM4", baudrate=1382400, bytesize=8, timeout=2, stopbits=serial.STOPBITS_TWO
         )
         print("Serial port initialized successfully.")
     except Exception as e:
@@ -40,23 +40,36 @@ class SerialReaderApp:
         self.root.title("Serial Data Reader")
         self.queue = queue.Queue()
 
-        # Create the main frame
+        # Create the main frame with responsive layout
         main_frame = ttk.Frame(root)
         main_frame.grid(row=0, column=0, sticky="nsew")
+        main_frame.columnconfigure(0, weight=3)  # Graphs take 3/4 of the width
+        main_frame.columnconfigure(1, weight=1)  # Labels take 1/4 of the width
+        main_frame.rowconfigure(0, weight=1)
 
         # Left side: Graphs
         graph_frame = ttk.Frame(main_frame)
         graph_frame.grid(row=0, column=0, sticky="nsew")
 
-        # Create the graphs
-        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(5, 4), sharex=True)
-        self.ax1.set_title("Heart Phase")
+        self.buffer_size = int(buffer_size * 1000 / update_time)
+        global time_values, heart_phase_values, breath_phase_values
+        time_values = np.linspace(-buffer_size, 0, self.buffer_size)
+        heart_phase_values = np.zeros(self.buffer_size)
+        breath_phase_values = np.zeros(self.buffer_size)
+
+        # Create the graphs with improved styling
+        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(6, 5), sharex=True)
+        self.ax1.set_title("Heart Phase", fontsize=10)
         self.ax1.set_ylim(-8, 8)
-        self.ax2.set_title("Breath Phase")
+        self.ax1.set_xlim(-buffer_size, 0)
+        self.ax1.grid(True, linestyle='--', alpha=0.5)
+        self.ax2.set_title("Breath Phase", fontsize=10)
         self.ax2.set_ylim(-8, 8)
-        self.ax2.set_xlabel("Time")
-        self.line1, = self.ax1.plot(time_values, heart_phase_values, "r-")
-        self.line2, = self.ax2.plot(time_values, breath_phase_values, "b-")
+        self.ax2.set_xlabel("Time (seconds)", fontsize=10)
+        self.ax2.set_xlim(-buffer_size, 0)
+        self.ax2.grid(True, linestyle='--', alpha=0.5)
+        self.line1, = self.ax1.plot(time_values, heart_phase_values, "r-", linewidth=1.5)
+        self.line2, = self.ax2.plot(time_values, breath_phase_values, "b-", linewidth=1.5)
         self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
         canvas_widget = self.canvas.get_tk_widget()
         canvas_widget.pack(fill=tk.BOTH, expand=True)
@@ -64,44 +77,45 @@ class SerialReaderApp:
         # Right side: Labels (Squares)
         square_frame = ttk.Frame(main_frame)
         square_frame.grid(row=0, column=1, sticky="nsew", padx=10)
+        square_frame.columnconfigure(0, weight=1)
 
-        self.square1_1 = tk.Label(square_frame, bg="white", font=("Arial", 14), fg="black",
-                                  borderwidth=2, relief="solid", width=20, height=3)
-        self.square1_1.pack(pady=5)
+        self.square_labels = []
+        for i, label_text in enumerate(["Heart:", "Breath:", "Total:", "Distance:"]):
+            label = tk.Label(
+                square_frame,
+                bg="#f0f0f0",
+                font=("Arial", 14, "bold"),
+                fg="black",
+                borderwidth=2,
+                relief="solid",
+                width=20,
+                height=3,
+                anchor="center"
+            )
+            label.config(text=f"{label_text}\n0.00000")
+            label.grid(row=i, column=0, pady=5, sticky="ew")
+            self.square_labels.append(label)
 
-        self.square1_2 = tk.Label(square_frame, bg="white", font=("Arial", 14), fg="black",
-                                  borderwidth=2, relief="solid", width=20, height=3)
-        self.square1_2.pack(pady=5)
-
-        self.square1_3 = tk.Label(square_frame, bg="white", font=("Arial", 14), fg="black",
-                                  borderwidth=2, relief="solid", width=20, height=3)
-        self.square1_3.pack(pady=5)
-
-        self.square1_4 = tk.Label(square_frame, bg="white", font=("Arial", 14), fg="black",
-                                  borderwidth=2, relief="solid", width=20, height=3)
-        self.square1_4.pack(pady=5)
-
-        # Log area
+        # Log area with scrollbar and auto-scroll
         log_frame = ttk.Frame(root)
         log_frame.grid(row=1, column=0, sticky="nsew")
-        self.text_log = tk.Text(log_frame, height=6, width=50, state=tk.DISABLED)
-        self.text_log.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(log_frame, command=self.text_log.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.text_log.config(yscrollcommand=scrollbar.set)
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
 
-        # Configure grid weights
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(0, weight=3)
-        root.rowconfigure(1, weight=1)
-        main_frame.columnconfigure(0, weight=3)
-        main_frame.columnconfigure(1, weight=1)
+        self.text_log = tk.Text(log_frame, height=6, state=tk.DISABLED, wrap=tk.NONE)
+        self.text_log.grid(row=0, column=0, sticky="nsew")
+        scrollbar_x = ttk.Scrollbar(log_frame, orient=tk.HORIZONTAL, command=self.text_log.xview)
+        scrollbar_x.grid(row=1, column=0, sticky="ew")
+        scrollbar_y = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.text_log.yview)
+        scrollbar_y.grid(row=0, column=1, sticky="ns")
+        self.text_log.config(xscrollcommand=scrollbar_x.set, yscrollcommand=scrollbar_y.set)
 
         # Start the serial reading thread
         self.thread = threading.Thread(target=self.read_serial_thread, daemon=True)
         self.thread.start()
 
         # Start the UI update loop
+        self.update_counter = 0  # Counter to control graph redraw frequency
         self.update_ui()
 
     def read_serial_thread(self):
@@ -149,33 +163,36 @@ class SerialReaderApp:
             item = self.queue.get()
             if item["type"] == "data":
                 # Update labels
-                self.update_square_labels(
-                    item["HeartPhase"], item["BreathPhase"], item["TotalPhase"], 0
-                )
+                self.update_square_labels(item["HeartPhase"], item["BreathPhase"], item["TotalPhase"], None)
             elif item["type"] == "distance":
                 # Update only the distance label
-                self.square1_4.config(text=f"Distance:\n{round(item['Distance'], decimal_round)}")
+                self.square_labels[3].config(text=f"Distance:\n{round(item['Distance'], decimal_round)}")
 
-            # Log message
+            # Log message (limit log size to 1000 lines)
             self.text_log.config(state=tk.NORMAL)
             self.text_log.insert(tk.END, item["message"])
+            if float(self.text_log.index('end-1c')) > 1000:  # Keep max 1000 lines
+                self.text_log.delete("1.0", "2.0")
             self.text_log.config(state=tk.DISABLED)
             self.text_log.yview(tk.END)
 
-        # Update the graphs
-        self.line1.set_ydata(heart_phase_values)
-        self.line2.set_ydata(breath_phase_values)
-        self.canvas.draw()
+        # Update the graphs efficiently (redraw every 2 updates)
+        self.update_counter += 1
+        if self.update_counter % 2 == 0:
+            self.line1.set_ydata(heart_phase_values)
+            self.line2.set_ydata(breath_phase_values)
+            self.canvas.draw_idle()  # Use draw_idle for better performance
 
         if running:
             self.root.after(update_time, self.update_ui)
 
     def update_square_labels(self, HeartPhase, BreathPhase, TotalPhase, Distance):
         """Update the square labels with the latest values."""
-        self.square1_1.config(text=f"Heart:\n{round(HeartPhase, decimal_round)}")
-        self.square1_2.config(text=f"Breath:\n{round(BreathPhase, decimal_round)}")
-        self.square1_3.config(text=f"Total:\n{round(TotalPhase, decimal_round)}")
-        self.square1_4.config(text=f"Distance:\n{round(Distance, decimal_round)}")
+        self.square_labels[0].config(text=f"Heart:\n{round(HeartPhase, decimal_round)}")
+        self.square_labels[1].config(text=f"Breath:\n{round(BreathPhase, decimal_round)}")
+        self.square_labels[2].config(text=f"Total:\n{round(TotalPhase, decimal_round)}")
+        if Distance is not None:
+            self.square_labels[3].config(text=f"Distance:\n{round(Distance, decimal_round)}")
 
     def on_close(self):
         """Handle application shutdown."""
@@ -183,6 +200,7 @@ class SerialReaderApp:
         running = False
         if serialPort and serialPort.is_open:
             serialPort.close()
+        self.root.quit()
         self.root.destroy()
 
 
@@ -190,7 +208,10 @@ def create_gui():
     """Create and configure the GUI."""
     global root
     root = tk.Tk()
-    root.geometry("1600x1000")
+    root.geometry("1200x800")  # Adjusted default size
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=4)
+    root.rowconfigure(1, weight=1)
     app = SerialReaderApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     return root
